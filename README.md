@@ -30,7 +30,7 @@ You can then `require('canvas-confetti');` to use it in your project build. _Not
 You can also include this library in your HTML page directly from a CDN:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
 ```
 
 _Note: you should use the latest version at the time that you include your project. You can see all versions [on the releases page](https://github.com/catdad/canvas-confetti/releases)._
@@ -66,15 +66,62 @@ The `confetti` parameter is a single optional `options` object, which has the fo
 - `decay` _Number (default: 0.9)_: How quickly the confetti will lose speed. Keep this number between 0 and 1, otherwise the confetti will gain speed. Better yet, just never change it.
 - `gravity` _Number (default: 1)_: How quickly the particles are pulled down. 1 is full gravity, 0.5 is half gravity, etc., but there are no limits. You can even make particles go up if you'd like.
 - `drift` _Number (default: 0)_: How much to the side the confetti will drift. The default is 0, meaning that they will fall straight down. Use a negative number for left and positive number for right.
+- `flat` _Boolean (default: false)_: Optionally turns off the tilt and wobble that three dimensional confetti would have in the real world. Yeah, they look a little sad, but y'all asked for them, so don't blame me.
 - `ticks` _Number (default: 200)_: How many times the confetti will move. This is abstract... but play with it if the confetti disappear too quickly for you.
 - `origin` _Object_: Where to start firing confetti from. Feel free to launch off-screen if you'd like.
   - `origin.x` _Number (default: 0.5)_: The `x` position on the page, with `0` being the left edge and `1` being the right edge.
   - `origin.y` _Number (default: 0.5)_: The `y` position on the page, with `0` being the top edge and `1` being the bottom edge.
 - `colors` _Array&lt;String&gt;_: An array of color strings, in the HEX format... you know, like `#bada55`.
-- `shapes` _Array&lt;String&gt;_: An array of shapes for the confetti. The possible values are `square`, `circle`, and `star`. The default is to use both squares and circles in an even mix. To use a single shape, you can provide just one shape in the array, such as `['star']`. You can also change the mix by providing a value such as `['circle', 'circle', 'square']` to use two third circles and one third squares.
+- `shapes` _Array&lt;String|Shape&gt;_: An array of shapes for the confetti. There are 3 built-in values of `square`, `circle`, and `star`. The default is to use both squares and circles in an even mix. To use a single shape, you can provide just one shape in the array, such as `['star']`. You can also change the mix by providing a value such as `['circle', 'circle', 'square']` to use two third circles and one third squares. You can also create your own shapes using the [`confetti.shapeFromPath`](#confettishapefrompath-path-matrix---shape) or [`confetti.shapeFromText`](#confettishapefromtext-text-scalar-color-fontfamily---shape) helper methods.
 - `scalar` _Number (default: 1)_: Scale factor for each confetti particle. Use decimals to make the confetti smaller. Go on, try teeny tiny confetti, they are adorable!
 - `zIndex` _Integer (default: 100)_: The confetti should be on top, after all. But if you have a crazy high page, you can set it even higher.
 - `disableForReducedMotion` _Boolean (default: false)_: Disables confetti entirely for users that [prefer reduced motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion). The `confetti()` promise will resolve immediately in this case.
+
+### `confetti.shapeFromPath({ path, matrix? })` → `Shape`
+
+This helper method lets you create a custom confetti shape using an [SVG Path string](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d). Any valid path should work, though there are a few caveats:
+- All paths will be filed. If you were hoping to have a stroke path, that is not implemented.
+- Paths are limited to a single color, so keep that in mind.
+- All paths need a valid transform matrix. You can pass one in, or you can leave it out and use this helper to calculate the matrix for you. Do note that calculating the matrix is a bit expensive, so it is best to calculate it once for each path in development and cache that value, so that production confetti remain fast. The matrix is deterministic and will always be the same given the same path value.
+- For best forward compatibility, it is best to re-generate and re-cache the matrix if you update the `canvas-confetti` library.
+- Support for path-based confetti is limited to browsers which support [`Path2D`](https://developer.mozilla.org/en-US/docs/Web/API/Path2D), which should really be all major browser at this point.
+
+This method will return a `Shape` -- it's really just a plain object with some properties, but shhh... we'll pretend it's a shape. Pass this `Shape` object into the `shapes` array directly.
+
+As an example, here's how you might do a triangle confetti:
+
+```javascript
+var triangle = confetti.shapeFromPath({ path: 'M0 10 L5 0 L10 10z' });
+
+confetti({
+  shapes: [triangle]
+});
+```
+
+### `confetti.shapeFromText({ text, scalar?, color?, fontFamily? })` → `Shape`
+
+This is the highly anticipated feature to render emoji confetti! Use any standard unicode emoji. Or other text, but... maybe don't use other text.
+
+While any text should work, there are some caveats:
+- For flailing confetti, something that is mostly square works best. That is, a single character, especially an emoji.
+- Rather than rendering text every time a confetti is drawn, this helper actually rasterizes the text. Therefore, it does not scale well after it is created. If you plan to use the `scalar` value to scale your confetti, use the same `scalar` value here when creating the shape. This will make sure the confetti are not blurry.
+
+The options for this method are:
+- `options` _`Object`_:
+  - `text` _`String`_: the text to be rendered as a confetti. If you can't make up your mind, I suggest "🐈".
+  - `scalar` _`Number, optional, default: 1`_: a scale value relative to the default size. It matches the `scalar` value in the confetti options.
+  - `color` _`String, optional, default: #000000`_: the color used to render the text.
+  - `fontFamily` _`String, optional, default: native emoji`_: the font family name to use when rendering the text. The default follows [best practices for rendring the native OS emoji of the device](https://nolanlawson.com/2022/04/08/the-struggle-of-using-native-emoji-on-the-web/), falling back to `sans-serif`. If using a web font, make sure this [font is loaded](https://developer.mozilla.org/en-US/docs/Web/API/FontFace/load) before rendering your confetti.
+
+```javascript
+var scalar = 2;
+var pineapple = confetti.shapeFromText({ text: '🍍', scalar });
+
+confetti({
+  shapes: [pineapple],
+  scalar
+});
+```
 
 ### `confetti.create(canvas, [globalOptions])` → `function`
 

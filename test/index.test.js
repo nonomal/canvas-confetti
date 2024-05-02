@@ -13,13 +13,15 @@ const PORT = 9999;
 const width = 500;
 const height = 500;
 
+const args = ['--disable-background-timer-throttling'];
+
 // Docker-based CIs need this disabled
 // https://github.com/Quramy/puppeteer-example/blob/c28a5aa52fe3968c2d6cfca362ec28c36963be26/README.md#with-docker-based-ci-services
-const args = process.env.CI ? [
-  '--no-sandbox', '--disable-setuid-sandbox'
-] : [];
-const headless = process.env.CI ? true :
-  process.env['CONFETTI_SHOW'] ? false : true;
+if (process.env.CI) {
+  args.push('--no-sandbox', '--disable-setuid-sandbox');
+}
+
+const headless = (process.env.CI || !('CONFETTI_SHOW' in process.env)) ? 'new' : false;
 
 const mkdir = async (dir) => {
   return promisify(fs.mkdir)(dir)
@@ -62,7 +64,7 @@ const testBrowser = (() => {
 
     return puppeteer.launch({
       headless,
-      args: [ '--disable-background-timer-throttling' ].concat(args)
+      args
     }).then(thisBrowser => {
       browser = thisBrowser;
       return Promise.resolve(browser);
@@ -77,6 +79,8 @@ const testPage = async () => {
 
   // eslint-disable-next-line no-console
   page.on('pageerror', err => console.error(err));
+  // eslint-disable-next-line no-console
+  page.on('console', msg => console.log(msg.text()));
 
   return page;
 };
@@ -103,26 +107,53 @@ const createBuffer = (data, format) => {
   }
 };
 
+function serializeConfettiOptions(opts) {
+  let serializedOpts = opts ? JSON.stringify(opts) : '';
+
+  if (opts && opts.shapes && Array.isArray(opts.shapes)) {
+    const { shapes, ...rest } = opts;
+
+    const serializedShapes = shapes.map(shape => {
+      if (typeof shape === 'function') {
+        return `(${shape.toString()})()`;
+      }
+
+      return JSON.stringify(shape);
+    });
+
+    serializedOpts = `{
+      ...${JSON.stringify(rest)},
+      shapes: [${serializedShapes.join(', ')}]
+    }`;
+  }
+
+  return serializedOpts;
+}
+
 function confetti(opts, wait = false, funcName = 'confetti') {
+  const serializedOpts = serializeConfettiOptions(opts);
+
   return `
 ${wait ? '' : `${funcName}.Promise = null;`}
-${funcName}(${opts ? JSON.stringify(opts) : ''});
+${funcName}(${serializedOpts});
 `;
 }
 
-async function confettiImage(page, opts = {}, funcName = 'confetti') {
-  const base64png = await page.evaluate(`
-  ${funcName}(${JSON.stringify(opts)});
-  new Promise(function (resolve, reject) {
-    setTimeout(function () {
-      var canvas = document.querySelector('canvas');
-      return resolve(canvas.toDataURL('image/png'));
-    }, 200);
-  });
-`);
+const base64ToBuffer = base64png => createBuffer(base64png.replace(/data:image\/png;base64,/, ''), 'base64');
 
-  const imageData = base64png.replace(/data:image\/png;base64,/, '');
-  return createBuffer(imageData, 'base64');
+async function confettiImage(page, opts = {}, funcName = 'confetti') {
+  const serializedOpts = serializeConfettiOptions(opts);
+  const base64png = await page.evaluate(`
+    ${funcName}(${serializedOpts});
+    new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        var canvas = document.querySelector('canvas');
+        return resolve(canvas.toDataURL('image/png'));
+      }, 200);
+    });
+  `);
+
+  return base64ToBuffer(base64png);
 }
 
 function hex(n) {
@@ -346,13 +377,17 @@ test('shoots default scaled confetti', async t => {
   t.context.buffer = await confettiImage(page, {
     colors: ['#0000ff'],
     shapes: ['circle'],
-    particleCount: 10
+    particleCount: 1,
+    startVelocity: 0,
+    gravity: 0,
+    flat: true
   });
   t.context.image = await removeOpacity(t.context.buffer);
 
   const pixels = await totalPixels(t.context.image);
 
-  t.is(pixels > 100 && pixels < 500, true);
+  const expected = 124;
+  t.true(pixels > expected * .99 && pixels < expected * 1.01, `${pixels}±1% ≠ ${expected}`);
 });
 
 test('shoots larger scaled confetti', async t => {
@@ -362,13 +397,17 @@ test('shoots larger scaled confetti', async t => {
     colors: ['#0000ff'],
     shapes: ['circle'],
     scalar: 10,
-    particleCount: 10
+    particleCount: 1,
+    startVelocity: 0,
+    gravity: 0,
+    flat: true
   });
   t.context.image = await removeOpacity(t.context.buffer);
 
   const pixels = await totalPixels(t.context.image);
 
-  t.is(pixels > 2000, true);
+  const expected = 11476;
+  t.true(pixels > expected * .99 && pixels < expected * 1.01, `${pixels} ± 1% ≠ ${expected}`);
 });
 
 test('shoots confetti to the left', async t => {
@@ -407,6 +446,24 @@ test('shoots confetti to the right', async t => {
   t.deepEqual(pixels.right, ['#0000ff', '#ffffff']);
   // left side is all white
   t.deepEqual(pixels.left, ['#ffffff']);
+});
+
+test('shoots flat confetti', async t => {
+  const page = t.context.page = await fixturePage();
+
+  // these parameters should create an image
+  // that is the same every time
+  t.context.buffer = await confettiImage(page, {
+    startVelocity: 0,
+    gravity: 0,
+    scalar: 20,
+    flat: 1,
+    shapes: ['circle'],
+    colors: ['ff0000']
+  });
+  t.context.image = await readImage(t.context.buffer);
+
+  t.is(t.context.image.hash(), '8E0802208w0');
 });
 
 /*
@@ -576,6 +633,190 @@ test('stops and removes canvas immediately when `reset` is called', async t => {
 });
 
 /*
+ * Shape from path
+ */
+test('[paths] `shapeFromPath` creates an object with a path and transform matrix', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const result = await page.evaluate(`
+    confetti.shapeFromPath('M0 0 L10 0 L10 10 L0 10z');
+  `);
+
+  t.deepEqual(result, {
+    type: 'path',
+    path: 'M0 0 L10 0 L10 10 L0 10z',
+    matrix: [ 1, 0, 0, 1, -5, -5 ]
+  });
+});
+
+test('[paths] `shapeFromPath` crops the shape and centers in the middle of the actual path object', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const result = await page.evaluate(`
+    confetti.shapeFromPath('M100 100 L110 100 L110 110 L100 110z');
+  `);
+
+  t.deepEqual(result, {
+    type: 'path',
+    path: 'M100 100 L110 100 L110 110 L100 110z',
+    matrix: [ 1, 0, 0, 1, -105, -105 ]
+  });
+});
+
+test('[paths] shoots confetti of a custom shape', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const shape = await page.evaluate(`
+    confetti.shapeFromPath('M0 10 L5 0 L10 10z');
+  `);
+
+  // these parameters should create an image
+  // that is the same every time
+  t.context.buffer = await confettiImage(page, {
+    startVelocity: 0,
+    gravity: 0,
+    scalar: 20,
+    flat: 1,
+    shapes: [shape],
+    colors: ['ff0000']
+  });
+  t.context.image = await readImage(t.context.buffer);
+
+  t.is(t.context.image.hash(), '9I0p03d03c0');
+});
+
+/*
+ * Shape from text
+ */
+
+const loadFont = async page => {
+  // Noto Color Emoji
+  const url = 'https://fonts.gstatic.com/s/notocoloremoji/v25/Yq6P-KqIXTD0t4D9z1ESnKM3-HpFabsE4tq3luCC7p-aXxcn.9.woff2';
+  const name = 'Web Font';
+
+  await page.evaluate(`
+    Promise.resolve().then(async () => {
+      const fontFile = new FontFace(
+        "${name}",
+        "url(${url})",
+      );
+
+      document.fonts.add(fontFile);
+
+      await fontFile.load();
+    });
+  `, );
+
+  return name;
+};
+
+const shapeFromTextImage = async (page, args) => {
+  const { base64png, ...shape } = await page.evaluate(`
+    Promise.resolve().then(async () => {
+      const { bitmap, ...shape } = confetti.shapeFromText(${JSON.stringify(args)});
+
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
+
+      return {
+        ...shape,
+        base64png: canvas.toDataURL('image/png')
+      };
+    });
+  `);
+
+  return {
+    ...shape,
+    buffer: base64ToBuffer(base64png)
+  };
+};
+
+test('[text] shapeFromText renders an emoji', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const fontFace = await loadFont(page);
+
+  const { buffer, ...shape } = await shapeFromTextImage(page, { text: '😀', fontFamily: `"${fontFace}"`, scalar: 10 });
+
+  t.context.buffer = buffer;
+  t.context.image = await readImage(buffer);
+
+  t.deepEqual({
+    hash: t.context.image.hash(),
+    ...shape
+  }, {
+    type: 'bitmap',
+    matrix: [ 0.1, 0, 0, 0.1, -5.7, -5.550000000000001 ],
+    hash: 'c4y5z8b83AC'
+  });
+});
+
+test('[text] shapeFromText works with just a string parameter', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const shape = await page.evaluate(`
+    confetti.shapeFromText("🍍");
+  `);
+
+  t.deepEqual(Object.keys(shape).sort(), ['type', 'bitmap', 'matrix'].sort());
+  // the actual contents will differ from OS to OS, so just validate
+  // the shape has some expected properties
+  t.is(shape.type, 'bitmap');
+  t.is(Array.isArray(shape.matrix), true);
+  t.is(shape.matrix.length, 6);
+});
+
+test('[text] shapeFromText renders black text by default', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const { buffer } = await shapeFromTextImage(page, { text: 'pie', scalar: 3 });
+
+  t.context.buffer = buffer;
+  t.context.image = await reduceImg(buffer);
+
+  t.deepEqual(await uniqueColors(t.context.image), ['#000000', '#ffffff']);
+});
+
+test('[text] shapeFromText can optionally render text in a requested color', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const { buffer } = await shapeFromTextImage(page, { text: 'pie', color: '#00ff00', scalar: 3 });
+
+  t.context.buffer = buffer;
+  t.context.image = await reduceImg(buffer);
+
+  t.deepEqual(await uniqueColors(t.context.image), ['#00ff00', '#ffffff']);
+});
+
+// this test renders a black canvas in a headless browser
+// but works fine when it is not headless
+// eslint-disable-next-line ava/no-skip-test
+test('[text] shoots confetti of an emoji shape', async t => {
+  const page = t.context.page = await fixturePage();
+
+  const fontFace = await loadFont(page);
+  await page.evaluate(`window.__fontFamily = '"${fontFace}"'`);
+
+  // these parameters should create an image
+  // that is the same every time
+  t.context.buffer = await confettiImage(page, {
+    startVelocity: 0,
+    gravity: 0,
+    scalar: 10,
+    flat: 1,
+    ticks: 1000,
+    // eslint-disable-next-line no-undef
+    shapes: [() => confetti.shapeFromText({ text: '😀', fontFamily: __fontFamily, scalar: 10 })]
+  });
+  t.context.image = await readImage(t.context.buffer);
+
+  t.is(t.context.image.hash(), 'cPpcSrcCjdC');
+});
+
+/*
  * Custom canvas
  */
 
@@ -605,7 +846,7 @@ const getCanvasSize = async (page) => {
   `);
 };
 
-test('can create instances of confetti in separate canvas', async t => {
+test('[custom canvas] can create instances of confetti in separate canvas', async t => {
   const page = t.context.page = await fixturePage();
   await injectCanvas(page);
 
@@ -622,7 +863,7 @@ test('can create instances of confetti in separate canvas', async t => {
   t.notDeepEqual(beforeSize, afterSize);
 });
 
-test('can use a custom canvas without resizing', async t => {
+test('[custom canvas] can use a custom canvas without resizing', async t => {
   const page = t.context.page = await fixturePage();
   await injectCanvas(page, { allowResize: false });
 
@@ -701,20 +942,20 @@ const resizeTest = async (t, createOpts, createName = 'confetti.create') => {
   t.deepEqual(await uniqueColors(third), ['#0000ff', '#ffffff']);
 };
 
-test('resizes the custom canvas when the window resizes', async t => {
+test('[custom canvas] resizes the custom canvas when the window resizes', async t => {
   await resizeTest(t, {
     resize: true
   });
 });
 
-test('resizes the custom canvas when the window resizes and a worker is used', async t => {
+test('[custom canvas] resizes the custom canvas when the window resizes and a worker is used', async t => {
   await resizeTest(t, {
     resize: true,
     useWorker: true
   });
 });
 
-test('can use a custom canvas with workers and resize it', async t => {
+test('[custom canvas] can use a custom canvas with workers and resize it', async t => {
   const page = t.context.page = await fixturePage();
   await injectCanvas(page, {
     allowResize: true,
@@ -734,7 +975,7 @@ test('can use a custom canvas with workers and resize it', async t => {
   t.notDeepEqual(beforeSize, afterSize);
 });
 
-test('shoots confetti repeatedly in defaut and custom canvas using requestAnimationFrame', async t => {
+test('[custom canvas] shoots confetti repeatedly in defaut and custom canvas using requestAnimationFrame', async t => {
   const page = t.context.page = await fixturePage();
   await injectCanvas(page);
   const time = 6 * 1000;
@@ -800,7 +1041,7 @@ test('shoots confetti repeatedly in defaut and custom canvas using requestAnimat
   t.deepEqual(await uniqueColors(await reduceImg(img4)), ['#0000ff', '#ff0000', '#ffffff']);
 });
 
-test('can initialize the same canvas multiple times when using a worker', async t => {
+test('[custom canvas] can initialize the same canvas multiple times when using a worker', async t => {
   const page = t.context.page = await fixturePage();
   await page.evaluate(`
     var canvas = document.createElement('canvas');
@@ -841,7 +1082,7 @@ test('can initialize the same canvas multiple times when using a worker', async 
   t.deepEqual(await uniqueColors(t.context.image), ['#ff0000', '#ff00ff', '#ffffff']);
 });
 
-test('can initialize the same canvas multiple times without using a worker', async t => {
+test('[custom canvas] can initialize the same canvas multiple times without using a worker', async t => {
   const page = t.context.page = await fixturePage();
   await page.evaluate(`
     var canvas = document.createElement('canvas');
@@ -883,7 +1124,7 @@ test('can initialize the same canvas multiple times without using a worker', asy
   t.deepEqual(await uniqueColors(t.context.image), ['#ff00ff', '#ffffff']);
 });
 
-test('calling `reset` method clears all existing confetti but more can be launched after', async t => {
+test('[custom canvas] calling `reset` method clears all existing confetti but more can be launched after', async t => {
   const page = t.context.page = await fixturePage();
   await injectCanvas(page);
 
@@ -912,7 +1153,7 @@ test('calling `reset` method clears all existing confetti but more can be launch
  * Browserify tests
  */
 
-test('works using the browserify bundle', async t => {
+test('[browserify] works using the browserify bundle', async t => {
   const page = t.context.page = await fixturePage('fixtures/page.browserify.html');
 
   await page.evaluate(`void confetti({
@@ -936,7 +1177,7 @@ test('works using the browserify bundle', async t => {
  * using minification close to that of jsDelivr
  */
 
-test('works using the terser minified and compressed code', async t => {
+test('[minified] works using the terser minified and compressed code', async t => {
   const page = t.context.page = await fixturePage('fixtures/page.minified.html');
 
   await page.evaluate(`void confetti({
@@ -959,7 +1200,7 @@ test('works using the terser minified and compressed code', async t => {
  * ESM tests
  */
 
-test('the esm module exposed confetti as the default', async t => {
+test('[esm] the esm module exposed confetti as the default', async t => {
   const page = t.context.page = await fixturePage('fixtures/page.module.html');
 
   t.context.buffer = await confettiImage(page, {
@@ -974,7 +1215,7 @@ test('the esm module exposed confetti as the default', async t => {
   t.deepEqual(pixels, ['#ff00ff', '#ffffff']);
 });
 
-test('the esm module exposed confetti.create as create', async t => {
+test('[esm] the esm module exposed confetti.create as create', async t => {
   const page = t.context.page = await fixturePage('fixtures/page.module.html');
 
   await injectCanvas(page, { allowResize: true }, 'createAlias');
@@ -989,8 +1230,20 @@ test('the esm module exposed confetti.create as create', async t => {
   t.deepEqual(pixels, ['#ff00ff', '#ffffff']);
 });
 
-test('exposed confetti method has a `reset` property', async t => {
+test('[esm] exposed confetti method has a `reset` property', async t => {
   const page = t.context.page = await fixturePage('fixtures/page.module.html');
 
   t.is(await page.evaluate(`typeof confettiAlias.reset`), 'function');
+});
+
+test('[esm] exposed confetti method has a `shapeFromPath` property', async t => {
+  const page = t.context.page = await fixturePage('fixtures/page.module.html');
+
+  t.is(await page.evaluate(`typeof confettiAlias.shapeFromPath`), 'function');
+});
+
+test('[esm] exposed confetti method has a `shapeFromText` property', async t => {
+  const page = t.context.page = await fixturePage('fixtures/page.module.html');
+
+  t.is(await page.evaluate(`typeof confettiAlias.shapeFromText`), 'function');
 });
